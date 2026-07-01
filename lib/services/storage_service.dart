@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/voice_note.dart';
 
@@ -10,11 +11,22 @@ class StorageService {
   // Get all voice notes, sorted by creation date descending
   static Future<List<VoiceNote>> getVoiceNotes() async {
     final prefs = await SharedPreferences.getInstance();
+
+    // Clear legacy/seeded notes once for a clean startup state
+    if (!prefs.containsKey('has_cleared_initial_seeds')) {
+      await prefs.remove(_keyVoiceNotes);
+      await prefs.setBool('has_cleared_initial_seeds', true);
+    }
+    
     final notesJson = prefs.getStringList(_keyVoiceNotes) ?? [];
     
-    final List<VoiceNote> notes = notesJson
-        .map((jsonStr) => VoiceNote.fromJson(jsonStr))
-        .toList();
+    final directory = await getApplicationDocumentsDirectory();
+    final List<VoiceNote> notes = notesJson.map((jsonStr) {
+      final note = VoiceNote.fromJson(jsonStr);
+      final filename = note.filePath.split('/').last;
+      final currentPath = '${directory.path}/$filename';
+      return note.copyWith(filePath: currentPath);
+    }).toList();
         
     // Sort descending (newest first)
     notes.sort((a, b) => b.createdAt.compareTo(a.createdAt));

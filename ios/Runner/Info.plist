@@ -68,6 +68,8 @@
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Whisperflow needs microphone access to record and transcribe your voice notes.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Whisperflow needs speech recognition access to transcribe your recorded voice notes on-device.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

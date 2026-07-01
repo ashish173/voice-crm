@@ -36,7 +36,7 @@ dependencies:
   cupertino_icons: ^1.0.8
 
   # Whisperflow Replica Core Packages
-  record: ^5.1.2
+  record: ^7.1.1
   audioplayers: ^6.0.0
   permission_handler: ^11.3.1
   app_links: ^6.0.1
@@ -45,7 +45,7 @@ dependencies:
   intl: ^0.19.0
   uuid: ^4.3.3
   http: ^1.2.1
-  speech_to_text: ^6.6.2
+
   flutter_spinkit: ^5.2.1
   url_launcher: ^6.2.5
 

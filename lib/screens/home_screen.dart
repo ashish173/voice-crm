@@ -1,9 +1,10 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../models/voice_note.dart';
 import '../services/storage_service.dart';
 import '../theme/app_theme.dart';
-import 'note_detail_screen.dart';
+import '../widgets/voice_note_bottom_sheet.dart';
 import 'recording_screen.dart';
 import 'settings_screen.dart';
 
@@ -18,10 +19,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   List<VoiceNote> _allNotes = [];
   List<VoiceNote> _filteredNotes = [];
   bool _isLoading = true;
+  bool _hasApiKey = true;
   
   String _searchQuery = '';
-  String _selectedTag = 'All';
-  List<String> _availableTags = ['All'];
 
   late AnimationController _fabController;
 
@@ -48,16 +48,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     setState(() => _isLoading = true);
     try {
       final notes = await StorageService.getVoiceNotes();
-      
-      // Extract unique tags for filtering
-      final Set<String> tagSet = {'All'};
-      for (var note in notes) {
-        tagSet.addAll(note.tags);
-      }
+      final key = await StorageService.getGeminiApiKey();
 
       setState(() {
         _allNotes = notes;
-        _availableTags = tagSet.toList();
+        _hasApiKey = key != null && key.isNotEmpty;
         _applyFilters();
         _isLoading = false;
       });
@@ -69,16 +64,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
   }
 
-  // Filter notes based on search query and selected tag
+  // Filter notes based on search query
   void _applyFilters() {
     setState(() {
       _filteredNotes = _allNotes.where((note) {
         final matchesSearch = note.title.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-            note.transcript.toLowerCase().contains(_searchQuery.toLowerCase());
+            note.transcript.toLowerCase().contains(_searchQuery.toLowerCase()) ||
+            (note.customer?.toLowerCase().contains(_searchQuery.toLowerCase()) ?? false);
         
-        final matchesTag = _selectedTag == 'All' || note.tags.contains(_selectedTag);
-        
-        return matchesSearch && matchesTag;
+        return matchesSearch;
       }).toList();
     });
   }
@@ -129,13 +123,17 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     return '${minutes.toString().padLeft(1, '0')}:${seconds.toString().padLeft(2, '0')}';
   }
 
-  // Helper to open details screen
-  void _openNoteDetails(VoiceNote note) async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (context) => NoteDetailScreen(note: note)),
+  // Helper to open details bottom sheet pane
+  void _openNoteDetails(VoiceNote note) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => VoiceNoteBottomSheet(
+        note: note,
+        onUpdate: _loadNotes,
+      ),
     );
-    _loadNotes(); // Reload notes in case they were updated
   }
 
   // Helper to open recording screen
@@ -170,12 +168,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          "Flow Notes",
+                          "Peraj AI",
                           style: Theme.of(context).textTheme.headlineLarge,
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          "AI-powered voice journal",
+                          "AI powered CRM",
                           style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                             color: AppTheme.accentMagenta.withOpacity(0.8),
                           ),
@@ -217,7 +215,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                   },
                   style: const TextStyle(color: AppTheme.textPrimary),
                   decoration: InputDecoration(
-                    hintText: "Search notes, transcripts, tags...",
+                    hintText: "Search notes, transcripts, customers...",
                     prefixIcon: const Icon(Icons.search_rounded, color: AppTheme.textSecondary),
                     suffixIcon: _searchQuery.isNotEmpty
                         ? GestureDetector(
@@ -235,51 +233,44 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 ),
               ),
 
-              // Tags Filters (Horizontal List)
-              if (_availableTags.length > 1)
-                Container(
-                  height: 40,
-                  margin: const EdgeInsets.only(bottom: 12.0),
-                  child: ListView.builder(
-                    scrollDirection: Axis.horizontal,
-                    padding: const EdgeInsets.symmetric(horizontal: 20.0),
-                    itemCount: _availableTags.length,
-                    itemBuilder: (context, index) {
-                      final tag = _availableTags[index];
-                      final isSelected = _selectedTag == tag;
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 8.0),
-                        child: GestureDetector(
-                          onTap: () {
-                            setState(() {
-                              _selectedTag = tag;
-                              _applyFilters();
-                            });
-                          },
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 250),
-                            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
-                            decoration: BoxDecoration(
-                              gradient: isSelected ? AppTheme.primaryGradient : null,
-                              color: isSelected ? null : AppTheme.surfaceTranslucent,
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: isSelected 
-                                    ? AppTheme.accentMagenta.withOpacity(0.5) 
-                                    : AppTheme.borderLight,
+              if (!_hasApiKey && !Platform.isIOS)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 4.0),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    decoration: AppTheme.glassDecoration(
+                      borderRadius: 12,
+                      borderColor: Colors.amber.withOpacity(0.3),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 20),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                "Gemini API Key Missing",
+                                style: TextStyle(
+                                  color: Colors.amber,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                ),
                               ),
-                            ),
-                            child: Text(
-                              tag,
-                              style: TextStyle(
-                                color: isSelected ? Colors.white : AppTheme.textSecondary,
-                                fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                              const SizedBox(height: 2),
+                              Text(
+                                "Using simulated voice note content. Tap the Settings icon above to configure your API key for real transcription.",
+                                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                  fontSize: 12,
+                                  color: AppTheme.textSecondary,
+                                ),
                               ),
-                            ),
+                            ],
                           ),
                         ),
-                      );
-                    },
+                      ],
+                    ),
                   ),
                 ),
 
@@ -419,30 +410,58 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         overflow: TextOverflow.ellipsis,
                       ),
                       const SizedBox(height: 12),
-                      // Tags and Action Menu
+                      // Customer Badge and Action Menu
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          // Note tags
-                          Wrap(
-                            spacing: 6,
-                            children: note.tags.map((tag) => Container(
+                          if (note.customer != null && note.customer!.isNotEmpty)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: AppTheme.accentViolet.withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: AppTheme.accentViolet.withOpacity(0.3)),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.business_rounded, color: AppTheme.accentViolet, size: 12),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    note.customer!,
+                                    style: const TextStyle(
+                                      color: AppTheme.accentViolet,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          else
+                            Container(
                               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                               decoration: BoxDecoration(
                                 color: AppTheme.bgObsidian.withOpacity(0.5),
                                 borderRadius: BorderRadius.circular(12),
                                 border: Border.all(color: AppTheme.borderLight),
                               ),
-                              child: Text(
-                                '#$tag',
-                                style: const TextStyle(
-                                  color: AppTheme.accentCyan,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w500,
-                                ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: const [
+                                  Icon(Icons.business_outlined, color: AppTheme.textMuted, size: 12),
+                                  SizedBox(width: 4),
+                                  Text(
+                                    'Unassigned',
+                                    style: TextStyle(
+                                      color: AppTheme.textMuted,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
                               ),
-                            )).toList(),
-                          ),
+                            ),
                           // Delete / Menu trigger
                           GestureDetector(
                             onTap: () => _deleteNote(note.id),
@@ -500,7 +519,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             Text(
               _searchQuery.isEmpty
                   ? "Tap the record button below or hold your side button to capture a voice note. The AI will handle the rest."
-                  : "Try checking your spelling or selecting a different tag filter.",
+                  : "Try checking your spelling or search terms.",
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium,
             ),

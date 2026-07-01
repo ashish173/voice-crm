@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -69,6 +70,37 @@ class _NoteDetailScreenState extends State<NoteDetailScreen> with SingleTickerPr
   // Setup player listeners
   void _initAudioPlayer() async {
     try {
+      // Set audio context to play through speaker and mix with other audio
+      await _audioPlayer.setAudioContext(
+        AudioContext(
+          iOS: AudioContextIOS(
+            category: AVAudioSessionCategory.playback,
+            options: const {
+              AVAudioSessionOptions.defaultToSpeaker,
+              AVAudioSessionOptions.mixWithOthers,
+            },
+          ),
+          android: AudioContextAndroid(
+            isSpeakerphoneOn: true,
+            stayAwake: true,
+            contentType: AndroidContentType.music,
+            usageType: AndroidUsageType.media,
+            audioFocus: AndroidAudioFocus.gain,
+          ),
+        ),
+      );
+
+      final fileExists = await File(_note.filePath).exists();
+      print("NoteDetailScreen: Audio file exists: $fileExists at: ${_note.filePath}");
+      if (!fileExists) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Warning: Audio file not found at local path. Playback may fail."),
+            backgroundColor: Colors.amber[700],
+          ),
+        );
+      }
+
       await _audioPlayer.setSource(DeviceFileSource(_note.filePath));
       
       _durationSub = _audioPlayer.onDurationChanged.listen((dur) {
@@ -103,10 +135,17 @@ class _NoteDetailScreenState extends State<NoteDetailScreen> with SingleTickerPr
 
   // Play / Pause toggle
   void _togglePlayPause() async {
-    if (_isPlaying) {
-      await _audioPlayer.pause();
-    } else {
-      await _audioPlayer.play(DeviceFileSource(_note.filePath));
+    try {
+      if (_isPlaying) {
+        await _audioPlayer.pause();
+      } else {
+        await _audioPlayer.play(DeviceFileSource(_note.filePath));
+      }
+    } catch (e) {
+      print("Error during playback: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Playback error: $e")),
+      );
     }
   }
 

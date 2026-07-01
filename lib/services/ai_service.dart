@@ -3,20 +3,42 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import '../models/voice_note.dart';
 import 'storage_service.dart';
+import 'transcription_service.dart';
 
 class AIService {
-  // Process the recorded audio note. If a Gemini API Key is configured, it will
-  // call the Gemini API for high-quality transcription, title, summary, action items, and tags.
-  // Otherwise, it will fallback to a simulated high-quality note.
+  // Process the recorded audio note. If native transcription is available, it uses it.
+  // Then, if a Gemini API Key is configured, it will call the Gemini API for high-quality
+  // summary, action items, and tags from the transcript text.
+  // Otherwise, it will fallback to audio-based Gemini or simulated note processing.
   static Future<VoiceNote> processAudioNote(String filePath, int durationMs) async {
     final apiKey = await StorageService.getGeminiApiKey();
 
+    // 1. Attempt native on-device transcription first (e.g. iOS)
+    try {
+      final nativeTranscript = await TranscriptionService.transcribeAudio(filePath);
+      if (nativeTranscript != null && nativeTranscript.trim().isNotEmpty) {
+        print("Successfully obtained native transcription: '$nativeTranscript'");
+        if (apiKey != null && apiKey.isNotEmpty) {
+          try {
+            return await _processTextTranscriptWithGemini(filePath, durationMs, nativeTranscript, apiKey);
+          } catch (e) {
+            print("Gemini API text processing failed, falling back to simulated text note: $e");
+            return _generateSimulatedNoteFromText(filePath, durationMs, nativeTranscript);
+          }
+        } else {
+          return _generateSimulatedNoteFromText(filePath, durationMs, nativeTranscript);
+        }
+      }
+    } catch (e) {
+      print("Native transcription failed or not supported: $e");
+    }
+
+    // 2. Fallback to full audio processing (Gemini or simulated)
     if (apiKey != null && apiKey.isNotEmpty) {
       try {
         return await _processWithGemini(filePath, durationMs, apiKey);
       } catch (e) {
-        print("Gemini API processing failed, falling back to simulated mode: $e");
-        // Fallback to simulated mode on failure so the user isn't blocked
+        print("Gemini API audio processing failed, falling back to simulated mode: $e");
         return _generateSimulatedNote(filePath, durationMs, errorContext: e.toString());
       }
     } else {
@@ -252,7 +274,7 @@ class AIService {
       aiSummary: summary,
       aiActions: actions,
       aiRewrite: initialRewrites,
-      tags: tags,
+      tags: const [],
     );
   }
 
@@ -296,5 +318,131 @@ In the coming weeks, we will be polishing these mechanisms to ensure seamless in
     - Review recorded objectives
     - Sync with team on milestones""";
     }
+  }
+
+  // Call Gemini with the text transcript to generate structural analysis (title, summary, actions, tags)
+  static Future<VoiceNote> _processTextTranscriptWithGemini(
+      String filePath, int durationMs, String transcript, String apiKey) async {
+    final url = Uri.parse(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey'
+    );
+
+    final prompt = """
+    Analyze this transcribed speech text. Perform the following operations:
+    1. Clean up any minor transcribing noise or run-on sentences to format it nicely, but preserve the exact meaning.
+    2. Generate a short, catchy, professional title (3-5 words) that summarizes the note.
+    3. Generate a summary list of 3-5 key takeaways/bullet points.
+    4. Extract a list of 2-5 actionable items or checklists. If there are no clear actions, suggest logical next steps.
+    5. Choose 1 to 3 relevant tags (e.g. "Work", "Idea", "Meeting", "Personal", "Study", "To-Do") for this note.
+
+    You MUST return the output as a JSON object with this exact structure:
+    {
+      "title": "Short Title Here",
+      "summary": ["Takeaway 1", "Takeaway 2", "Takeaway 3"],
+      "actions": ["Action Item 1", "Action Item 2"],
+      "tags": ["Tag1", "Tag2"]
+    }
+
+    Return ONLY the raw JSON output. Do not include markdown code block formatting (no ```json). Do not add any text before or after the JSON.
+
+    Speech Text to analyze:
+    "$transcript"
+    """;
+
+    final requestBody = {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": prompt
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "responseMimeType": "application/json"
+      }
+    };
+
+    final response = await http.post(
+      url,
+      headers: {"Content-Type": "application/json"},
+      body: json.encode(requestBody),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception("Gemini API text processing error (Status ${response.statusCode}): ${response.body}");
+    }
+
+    final responseJson = json.decode(response.body);
+    final textOutput = responseJson['candidates']?[0]['content']?[partsKey(responseJson)]?[0]['text'] ?? '';
+    
+    if (textOutput.toString().trim().isEmpty) {
+      throw Exception("Empty response received from Gemini API");
+    }
+
+    final Map<String, dynamic> data = json.decode(textOutput);
+    final id = DateTime.now().millisecondsSinceEpoch.toString();
+    
+    final initialRewrites = {
+      'Professional Email': await rewriteTranscript(transcript, 'Professional Email'),
+      'Blog Draft': await rewriteTranscript(transcript, 'Blog Draft'),
+      'Bulleted List': await rewriteTranscript(transcript, 'Bulleted List'),
+    };
+
+    return VoiceNote(
+      id: id,
+      title: data['title'] ?? 'Voice Note',
+      createdAt: DateTime.now(),
+      filePath: filePath,
+      durationMs: durationMs,
+      transcript: transcript,
+      aiSummary: List<String>.from(data['summary'] ?? []),
+      aiActions: List<String>.from(data['actions'] ?? []),
+      aiRewrite: initialRewrites,
+      tags: const [],
+    );
+  }
+
+  // Simulated Note Generator for Offline / Fallback mode using actual native transcript
+  static VoiceNote _generateSimulatedNoteFromText(String filePath, int durationMs, String transcript) {
+    final id = DateTime.now().millisecondsSinceEpoch.toString();
+    
+    // Simple heuristics for title
+    final words = transcript.split(' ');
+    String title = words.take(4).join(' ');
+    if (title.length > 25) {
+      title = '${title.substring(0, 22)}...';
+    }
+    if (title.trim().isEmpty) {
+      title = "Voice Note";
+    } else {
+      title = "${title[0].toUpperCase()}${title.substring(1)}";
+    }
+
+    final initialRewrites = {
+      'Professional Email': _simulateRewrite(transcript, 'Professional Email'),
+      'Blog Draft': _simulateRewrite(transcript, 'Blog Draft'),
+      'Bulleted List': _simulateRewrite(transcript, 'Bulleted List'),
+    };
+
+    return VoiceNote(
+      id: id,
+      title: title,
+      createdAt: DateTime.now(),
+      filePath: filePath,
+      durationMs: durationMs,
+      transcript: transcript,
+      aiSummary: [
+        "Transcribed locally using on-device Speech recognition.",
+        "Audio length: ${(durationMs / 1000).toStringAsFixed(1)} seconds."
+      ],
+      aiActions: [
+        "Review on-device transcription details",
+        "Add manual tags or categories if needed"
+      ],
+      aiRewrite: initialRewrites,
+      tags: const [],
+    );
   }
 }
