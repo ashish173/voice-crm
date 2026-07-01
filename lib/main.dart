@@ -7,6 +7,18 @@ import 'screens/recording_screen.dart';
 import 'screens/settings_screen.dart';
 import 'theme/app_theme.dart';
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Global recording state — used to coordinate side-button toggle behaviour
+// between the deep-link handler in main.dart and the active RecordingScreen.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// True while a RecordingScreen is mounted and actively recording.
+bool isRecordingActive = false;
+
+/// RecordingScreen sets this callback on mount so the deep-link handler can
+/// call _stopAndSaveNote() when the side button is pressed a second time.
+VoidCallback? onStopRecordingRequested;
+
 // Global key to navigate from deep link handler when app is running
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
@@ -61,18 +73,23 @@ class _MyAppState extends State<MyApp> {
     );
   }
 
-  // Parse deep link and navigate
+  // Parse deep link and navigate — or stop an active recording.
   void _handleDeepLink(Uri uri) {
     debugPrint("Incoming Deep Link: $uri");
-    
-    // Check if the scheme is whisperflow and target host is 'record'
-    // This matches whisperflow://record
-    final isRecordScheme = uri.scheme == 'whisperflow' && 
+
+    final isRecordScheme = uri.scheme == 'whisperflow' &&
         (uri.host == 'record' || uri.path.contains('record'));
 
-    if (isRecordScheme) {
-      // Delay slightly to ensure Navigator is initialized if app is cold starting
-      Future.delayed(const Duration(milliseconds: 500), () {
+    if (!isRecordScheme) return;
+
+    if (isRecordingActive && onStopRecordingRequested != null) {
+      // Second press while recording is live → stop & save
+      debugPrint("Side button: stopping active recording");
+      onStopRecordingRequested!();
+    } else {
+      // First press (or app was idle) → open recording screen
+      debugPrint("Side button: starting new recording");
+      Future.delayed(const Duration(milliseconds: 300), () {
         navigatorKey.currentState?.pushNamed('/record');
       });
     }
@@ -81,10 +98,10 @@ class _MyAppState extends State<MyApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Whisperflow',
+      title: 'Peraj AI',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,
-      navigatorKey: navigatorKey, // Required for deep-link routing
+      navigatorKey: navigatorKey,
       initialRoute: '/',
       routes: {
         '/': (context) => const HomeScreen(),

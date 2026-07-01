@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_spinkit/flutter_spinkit.dart';
 import 'package:record/record.dart';
+import '../main.dart' as app_globals;
 import '../models/voice_note.dart';
 import '../services/ai_service.dart';
 import '../services/recording_service.dart';
@@ -47,6 +48,9 @@ class _RecordingScreenState extends State<RecordingScreen> with TickerProviderSt
 
   @override
   void dispose() {
+    // Unregister from global state when screen leaves
+    app_globals.isRecordingActive = false;
+    app_globals.onStopRecordingRequested = null;
     _timer?.cancel();
     _ampSubscription?.cancel();
     _orbController.dispose();
@@ -69,6 +73,10 @@ class _RecordingScreenState extends State<RecordingScreen> with TickerProviderSt
       await _recordingService.startRecording();
       _startTimer();
       _startAmplitudeTracking();
+
+      // Register with global state so the side-button deep link can stop us
+      app_globals.isRecordingActive = true;
+      app_globals.onStopRecordingRequested = _stopAndSaveNote;
 
       setState(() {
         _isInitialized = true;
