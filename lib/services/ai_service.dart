@@ -5,45 +5,67 @@ import '../models/voice_note.dart';
 import 'storage_service.dart';
 import 'transcription_service.dart';
 
+/// Thrown when a recording doesn't contain enough speech to produce a
+/// transcript. Callers should surface this to the user directly instead of
+/// falling back to placeholder/dummy note content.
+class NotEnoughAudioException implements Exception {
+  final String message;
+  const NotEnoughAudioException([this.message = "Not enough audio was captured to transcribe. Please try recording again and speak clearly."]);
+
+  @override
+  String toString() => message;
+}
+
 class AIService {
+  // Network calls are capped so a stalled request can never leave the
+  // "processing" UI spinning indefinitely.
+  static const Duration _networkTimeout = Duration(seconds: 30);
+
   // Process the recorded audio note. If native transcription is available, it uses it.
   // Then, if a Gemini API Key is configured, it will call the Gemini API for high-quality
   // summary, action items, and tags from the transcript text.
-  // Otherwise, it will fallback to audio-based Gemini or simulated note processing.
+  // Otherwise, it will fallback to audio-based Gemini processing, or throw
+  // NotEnoughAudioException if there simply isn't any speech to work with.
   static Future<VoiceNote> processAudioNote(String filePath, int durationMs) async {
     final apiKey = await StorageService.getGeminiApiKey();
 
     // 1. Attempt native on-device transcription first (e.g. iOS)
+    String? nativeTranscript;
     try {
-      final nativeTranscript = await TranscriptionService.transcribeAudio(filePath);
-      if (nativeTranscript != null && nativeTranscript.trim().isNotEmpty) {
-        print("Successfully obtained native transcription: '$nativeTranscript'");
-        if (apiKey != null && apiKey.isNotEmpty) {
-          try {
-            return await _processTextTranscriptWithGemini(filePath, durationMs, nativeTranscript, apiKey);
-          } catch (e) {
-            print("Gemini API text processing failed, falling back to simulated text note: $e");
-            return _generateSimulatedNoteFromText(filePath, durationMs, nativeTranscript);
-          }
-        } else {
-          return _generateSimulatedNoteFromText(filePath, durationMs, nativeTranscript);
-        }
-      }
+      nativeTranscript = await TranscriptionService.transcribeAudio(filePath);
     } catch (e) {
       print("Native transcription failed or not supported: $e");
     }
 
-    // 2. Fallback to full audio processing (Gemini or simulated)
+    if (nativeTranscript != null && nativeTranscript.trim().isNotEmpty) {
+      print("Successfully obtained native transcription: '$nativeTranscript'");
+      if (apiKey != null && apiKey.isNotEmpty) {
+        try {
+          return await _processTextTranscriptWithGemini(filePath, durationMs, nativeTranscript, apiKey);
+        } catch (e) {
+          print("Gemini API text processing failed, falling back to on-device transcript only: $e");
+          return _generateSimulatedNoteFromText(filePath, durationMs, nativeTranscript);
+        }
+      } else {
+        return _generateSimulatedNoteFromText(filePath, durationMs, nativeTranscript);
+      }
+    }
+
+    // 2. No usable on-device transcript — fall back to full audio processing via Gemini
+    // if a key is configured, since Gemini can sometimes pick up speech the on-device
+    // recognizer missed.
     if (apiKey != null && apiKey.isNotEmpty) {
       try {
         return await _processWithGemini(filePath, durationMs, apiKey);
       } catch (e) {
-        print("Gemini API audio processing failed, falling back to simulated mode: $e");
-        return _generateSimulatedNote(filePath, durationMs, errorContext: e.toString());
+        print("Gemini API audio processing failed: $e");
+        throw const NotEnoughAudioException();
       }
-    } else {
-      return _generateSimulatedNote(filePath, durationMs);
     }
+
+    // No transcript from on-device recognition and no API key configured for a
+    // second attempt — there simply isn't enough audio to produce a note.
+    throw const NotEnoughAudioException();
   }
 
   // Upload audio note to Gemini for full transcription and structural analysis
@@ -105,7 +127,7 @@ class AIService {
       url,
       headers: {"Content-Type": "application/json"},
       body: json.encode(requestBody),
-    );
+    ).timeout(_networkTimeout);
 
     if (response.statusCode != 200) {
       throw Exception("Gemini API error (Status ${response.statusCode}): ${response.body}");
@@ -120,6 +142,10 @@ class AIService {
 
     // Parse the returned JSON from Gemini
     final Map<String, dynamic> data = json.decode(textOutput);
+
+    if ((data['transcript'] as String? ?? '').trim().isEmpty) {
+      throw const NotEnoughAudioException();
+    }
 
     final id = DateTime.now().millisecondsSinceEpoch.toString();
     
@@ -188,7 +214,7 @@ class AIService {
         url,
         headers: {"Content-Type": "application/json"},
         body: json.encode(requestBody),
-      );
+      ).timeout(_networkTimeout);
 
       if (response.statusCode != 200) {
         throw Exception("API Error: ${response.statusCode}");
@@ -202,80 +228,6 @@ class AIService {
       print("Rewrite API call failed: $e");
       return _simulateRewrite(transcript, template);
     }
-  }
-
-  // Simulated Note Generator for Offline / Fallback mode
-  static VoiceNote _generateSimulatedNote(String filePath, int durationMs, {String? errorContext}) {
-    final id = DateTime.now().millisecondsSinceEpoch.toString();
-    final dateStr = DateTime.now().toString().substring(0, 16);
-    
-    // Choose a realistic set of mock transcripts depending on note duration
-    String transcript;
-    String title;
-    List<String> summary;
-    List<String> actions;
-    List<String> tags;
-
-    if (durationMs < 5000) {
-      title = "Quick Reminder";
-      transcript = "Remember to buy groceries and call Ashish back before checking the logs tonight.";
-      summary = ["Quick reminder generated on recording.", "Tasks: buy groceries, contact Ashish."];
-      actions = ["Buy groceries", "Call Ashish back tonight"];
-      tags = ["Personal", "To-Do"];
-    } else if (durationMs < 15000) {
-      title = "Product Brainstorming";
-      transcript = "We should implement a premium design for the mobile app, focusing on glassmorphic elements, deep neon gradients, and elegant hover animations. Also, the iOS shortcut must trigger URL deep-linking immediately.";
-      summary = [
-        "Discussed mobile application visual requirements.",
-        "Stressed key elements: glassmorphic design and neon gradients.",
-        "Emphasized linking Action Button to custom URL schemes."
-      ];
-      actions = [
-        "Design translucent card overlay components in Flutter",
-        "Implement custom scheme handler for 'whisperflow://'",
-        "Test URL routing from native Shortcuts app"
-      ];
-      tags = ["Work", "Design"];
-    } else {
-      title = "Weekly Tech Sync";
-      transcript = "So for the weekly update, the database migration is complete and we verified that queries are twice as fast now. I need to document the new API schema in the wiki. Also, let's set up the staging environment and deploy the replica build for manual testing next Tuesday. Let's make sure the client logs are enabled.";
-      summary = [
-        "Announced successful completion of the database migration.",
-        "Reported 2x improvement in query performance.",
-        "Identified next steps: wiki documentation and staging setup.",
-        "Scheduled the replica build deployment for next Tuesday."
-      ];
-      actions = [
-        "Document new API schema in the developer wiki",
-        "Prepare staging deployment pipeline",
-        "Deploy Whisperflow replica build to staging by Tuesday morning",
-        "Confirm client log collectors are active"
-      ];
-      tags = ["Work", "Sync", "Engineering"];
-    }
-
-    if (errorContext != null) {
-      transcript = "[API Offline Fallback] $transcript\n\n(Note: Processing failed due to: $errorContext)";
-    }
-
-    final initialRewrites = {
-      'Professional Email': _simulateRewrite(transcript, 'Professional Email'),
-      'Blog Draft': _simulateRewrite(transcript, 'Blog Draft'),
-      'Bulleted List': _simulateRewrite(transcript, 'Bulleted List'),
-    };
-
-    return VoiceNote(
-      id: id,
-      title: title,
-      createdAt: DateTime.now(),
-      filePath: filePath,
-      durationMs: durationMs,
-      transcript: transcript,
-      aiSummary: summary,
-      aiActions: actions,
-      aiRewrite: initialRewrites,
-      tags: const [],
-    );
   }
 
   // Simulated Rewrite Generator for Offline Mode
@@ -368,7 +320,7 @@ In the coming weeks, we will be polishing these mechanisms to ensure seamless in
       url,
       headers: {"Content-Type": "application/json"},
       body: json.encode(requestBody),
-    );
+    ).timeout(_networkTimeout);
 
     if (response.statusCode != 200) {
       throw Exception("Gemini API text processing error (Status ${response.statusCode}): ${response.body}");

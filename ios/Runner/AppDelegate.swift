@@ -80,24 +80,39 @@ import Speech
       }
       
       var hasSentResult = false
-      recognizer.recognitionTask(with: request) { recognitionResult, error in
+      let sendResultOnce: (Any?) -> Void = { value in
+          if hasSentResult { return }
+          hasSentResult = true
+          result(value)
+      }
+
+      let task = recognizer.recognitionTask(with: request) { recognitionResult, error in
           DispatchQueue.main.async {
               if hasSentResult { return }
               
               if let error = error {
-                  hasSentResult = true
-                  result(FlutterError(code: "TRANSCRIBE_ERROR", message: error.localizedDescription, details: nil))
+                  // A very short or silent clip often surfaces as an error (e.g. "No speech detected")
+                  // rather than a final result. Treat this as "no transcript" instead of failing hard,
+                  // so the caller can fall back gracefully instead of hanging forever.
+                  sendResultOnce("")
                   return
               }
               
               guard let recognitionResult = recognitionResult else { return }
               
               if recognitionResult.isFinal {
-                  hasSentResult = true
                   let transcript = recognitionResult.bestTranscription.formattedString
-                  result(transcript)
+                  sendResultOnce(transcript)
               }
           }
+      }
+
+      // Safety timeout: some very short/silent clips never call back with isFinal or an error,
+      // which would otherwise leave the Flutter side awaiting this result indefinitely.
+      DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
+          if hasSentResult { return }
+          task.cancel()
+          sendResultOnce("")
       }
   }
 }
@@ -106,13 +121,13 @@ import Speech
 @available(iOS 16.0, *)
 struct RecordVoiceNoteIntent: AppIntent {
     static var title: LocalizedStringResource = "Record Voice Note"
-    static var description = IntentDescription("Launches Flow Notes and immediately starts recording a voice note.")
+    static var description = IntentDescription("Launches Peraj AI CRM and immediately starts recording a voice note.")
     static var openAppWhenRun: Bool = true
 
     @MainActor
     func perform() async throws -> some IntentResult {
         if let url = URL(string: "whisperflow://record") {
-            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            _ = await UIApplication.shared.open(url, options: [:])
         }
         return .result()
     }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/services.dart';
 
@@ -13,13 +14,18 @@ class TranscriptionService {
     }
 
     try {
+      // Guard against the native side hanging indefinitely on very short/silent
+      // clips (e.g. stopping a recording almost immediately via the side button).
       final String? transcript = await _channel.invokeMethod<String>(
         'transcribeFile',
         {'filePath': filePath},
-      );
+      ).timeout(const Duration(seconds: 15));
       if (transcript != null && transcript.trim().isNotEmpty) {
         return transcript.trim();
       }
+      return null;
+    } on TimeoutException catch (e) {
+      print("Native iOS transcription timed out: $e");
       return null;
     } on PlatformException catch (e) {
       print("Native iOS transcription failed: ${e.message} (code: ${e.code})");

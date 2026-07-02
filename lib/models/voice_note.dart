@@ -12,6 +12,8 @@ class VoiceNote {
   final Map<String, String> aiRewrite; // Key: template name, Value: rewritten content
   final List<String> tags;
   final String? customer;
+  final bool isProcessing;
+  final bool hasFailed;
 
   VoiceNote({
     required this.id,
@@ -25,6 +27,8 @@ class VoiceNote {
     this.aiRewrite = const {},
     this.tags = const [],
     this.customer,
+    this.isProcessing = false,
+    this.hasFailed = false,
   });
 
   // Convert to JSON Map
@@ -41,6 +45,8 @@ class VoiceNote {
       'aiRewrite': aiRewrite,
       'tags': tags,
       'customer': customer,
+      'isProcessing': isProcessing,
+      'hasFailed': hasFailed,
     };
   }
 
@@ -60,6 +66,8 @@ class VoiceNote {
       aiRewrite: Map<String, String>.from(map['aiRewrite'] ?? {}),
       tags: List<String>.from(map['tags'] ?? []),
       customer: map['customer'],
+      isProcessing: map['isProcessing'] ?? false,
+      hasFailed: map['hasFailed'] ?? false,
     );
   }
 
@@ -82,6 +90,8 @@ class VoiceNote {
     Map<String, String>? aiRewrite,
     List<String>? tags,
     String? customer,
+    bool? isProcessing,
+    bool? hasFailed,
   }) {
     return VoiceNote(
       id: id ?? this.id,
@@ -95,6 +105,8 @@ class VoiceNote {
       aiRewrite: aiRewrite ?? this.aiRewrite,
       tags: tags ?? this.tags,
       customer: customer ?? this.customer,
+      isProcessing: isProcessing ?? this.isProcessing,
+      hasFailed: hasFailed ?? this.hasFailed,
     );
   }
 }

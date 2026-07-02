@@ -5,6 +5,11 @@ import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
 class RecordingService {
+  // Singleton pattern to ensure recording lifecycle persists across screens
+  static final RecordingService _instance = RecordingService._internal();
+  factory RecordingService() => _instance;
+  RecordingService._internal();
+
   final AudioRecorder _recorder = AudioRecorder();
   bool _isRecording = false;
   String? _currentFilePath;

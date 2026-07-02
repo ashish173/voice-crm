@@ -19,6 +19,9 @@ bool isRecordingActive = false;
 /// call _stopAndSaveNote() when the side button is pressed a second time.
 VoidCallback? onStopRecordingRequested;
 
+/// HomeScreen sets this callback so we can notify it to reload the voice notes list
+VoidCallback? onVoiceNotesChanged;
+
 // Global key to navigate from deep link handler when app is running
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
@@ -37,6 +40,8 @@ class MyApp extends StatefulWidget {
 class _MyAppState extends State<MyApp> {
   final AppLinks _appLinks = AppLinks();
   StreamSubscription<Uri>? _linkSubscription;
+  DateTime? _lastLinkTime;
+  String? _lastLinkUri;
 
   @override
   void initState() {
@@ -75,6 +80,16 @@ class _MyAppState extends State<MyApp> {
 
   // Parse deep link and navigate — or stop an active recording.
   void _handleDeepLink(Uri uri) {
+    final now = DateTime.now();
+    if (_lastLinkUri == uri.toString() &&
+        _lastLinkTime != null &&
+        now.difference(_lastLinkTime!).inMilliseconds < 1000) {
+      debugPrint("Side button: duplicate deep link ignored ($uri)");
+      return;
+    }
+    _lastLinkUri = uri.toString();
+    _lastLinkTime = now;
+
     debugPrint("Incoming Deep Link: $uri");
 
     final isRecordScheme = uri.scheme == 'whisperflow' &&
@@ -82,13 +97,22 @@ class _MyAppState extends State<MyApp> {
 
     if (!isRecordScheme) return;
 
-    if (isRecordingActive && onStopRecordingRequested != null) {
-      // Second press while recording is live → stop & save
-      debugPrint("Side button: stopping active recording");
-      onStopRecordingRequested!();
+    if (isRecordingActive) {
+      // A RecordingScreen is already open (recording, stopping, or processing).
+      if (onStopRecordingRequested != null) {
+        // Still actively recording → this press means stop & save.
+        debugPrint("Side button: stopping active recording");
+        onStopRecordingRequested!();
+      } else {
+        // Already stopping/processing a previous take — ignore this press
+        // instead of stacking a second RecordingScreen on top of it, which
+        // would leave the old one stuck behind the new one indefinitely.
+        debugPrint("Side button: ignored — a recording is still being processed");
+      }
     } else {
-      // First press (or app was idle) → open recording screen
+      // No recording screen open → open a new one.
       debugPrint("Side button: starting new recording");
+      isRecordingActive = true; // Block subsequent start triggers immediately
       Future.delayed(const Duration(milliseconds: 300), () {
         navigatorKey.currentState?.pushNamed('/record');
       });

@@ -1,10 +1,11 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../models/voice_note.dart';
 import '../services/storage_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/voice_note_bottom_sheet.dart';
+import 'package:whisperflow_replica/main.dart' as app_globals;
+import '../services/background_processor.dart';
 import 'recording_screen.dart';
 import 'settings_screen.dart';
 
@@ -15,13 +16,13 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   List<VoiceNote> _allNotes = [];
   List<VoiceNote> _filteredNotes = [];
   bool _isLoading = true;
-  bool _hasApiKey = true;
   
   String _searchQuery = '';
+  final Set<String> _dismissedTaskIds = {};
 
   late AnimationController _fabController;
 
@@ -29,6 +30,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   void initState() {
     super.initState();
     _loadNotes();
+    WidgetsBinding.instance.addObserver(this);
+    app_globals.onVoiceNotesChanged = _loadNotes;
     
     // Pulse animation for the central recording button
     _fabController = AnimationController(
@@ -39,8 +42,20 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    if (app_globals.onVoiceNotesChanged == _loadNotes) {
+      app_globals.onVoiceNotesChanged = null;
+    }
     _fabController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      debugPrint("HomeScreen: App resumed, reloading voice notes list");
+      _loadNotes();
+    }
   }
 
   // Load voice notes from local storage
@@ -48,11 +63,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     setState(() => _isLoading = true);
     try {
       final notes = await StorageService.getVoiceNotes();
-      final key = await StorageService.getGeminiApiKey();
+
+      // Automatically resume background processing for any notes stuck in isProcessing
+      for (final note in notes) {
+        if (note.isProcessing) {
+          BackgroundProcessor.startProcessing(note);
+        }
+      }
 
       setState(() {
         _allNotes = notes;
-        _hasApiKey = key != null && key.isNotEmpty;
         _applyFilters();
         _isLoading = false;
       });
@@ -68,6 +88,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   void _applyFilters() {
     setState(() {
       _filteredNotes = _allNotes.where((note) {
+        // Exclude actively processing notes from the main list view
+        if (note.isProcessing) return false;
+
         final matchesSearch = note.title.toLowerCase().contains(_searchQuery.toLowerCase()) ||
             note.transcript.toLowerCase().contains(_searchQuery.toLowerCase()) ||
             (note.customer?.toLowerCase().contains(_searchQuery.toLowerCase()) ?? false);
@@ -233,73 +256,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 ),
               ),
 
-              if (!_hasApiKey && !Platform.isIOS)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 4.0),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                    decoration: AppTheme.glassDecoration(
-                      borderRadius: 12,
-                      borderColor: Colors.amber.withOpacity(0.3),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 20),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                "Gemini API Key Missing",
-                                style: TextStyle(
-                                  color: Colors.amber,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 13,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                "Using simulated voice note content. Tap the Settings icon above to configure your API key for real transcription.",
-                                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                  fontSize: 12,
-                                  color: AppTheme.textSecondary,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
 
-              // Quick Info Banner for physical Shortcut
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 4.0),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  decoration: AppTheme.glassDecoration(
-                    borderRadius: 12,
-                    borderColor: AppTheme.accentCyan.withOpacity(0.2),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.offline_bolt_rounded, color: AppTheme.accentCyan, size: 20),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          "Configure Side Button to trigger voice recording instantly. Tap settings icon above to view the setup guide.",
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            fontSize: 12,
-                            color: AppTheme.textSecondary,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+
+              _buildProcessingIndicator(),
 
               // Voice Notes List
               Expanded(
@@ -332,152 +291,149 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   // Note Card Widget
   Widget _buildNoteCard(VoiceNote note) {
     final dateFormatted = DateFormat('MMM d, yyyy • h:mm a').format(note.createdAt);
-    
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 12.0),
-      child: GestureDetector(
-        onTap: () => _openNoteDetails(note),
-        child: Container(
-          decoration: AppTheme.glassDecoration(),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onLongPress: () => _deleteNote(note.id),
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Card Header
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Expanded(
-                            child: Text(
-                              note.title,
-                              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: -0.3,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
+      child: Container(
+        decoration: AppTheme.glassDecoration(),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () => _openNoteDetails(note),
+              onLongPress: () => _deleteNote(note.id),
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Card Header
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            note.title,
+                            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: -0.3,
                             ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          // Duration badge
+                        ),
+                        // Duration badge
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: AppTheme.accentViolet.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.play_arrow_rounded, color: AppTheme.accentMagenta, size: 14),
+                              const SizedBox(width: 2),
+                              Text(
+                                _formatDuration(note.durationMs),
+                                style: const TextStyle(
+                                  color: AppTheme.accentMagenta,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    // Date
+                    Text(
+                      dateFormatted,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: AppTheme.textMuted,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    // Transcript preview
+                    Text(
+                      note.transcript,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: AppTheme.textSecondary,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 12),
+                    // Customer badge + delete
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        if (note.customer != null && note.customer!.isNotEmpty)
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(
-                              color: AppTheme.accentViolet.withOpacity(0.2),
-                              borderRadius: BorderRadius.circular(8),
+                              color: AppTheme.accentViolet.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: AppTheme.accentViolet.withOpacity(0.3)),
                             ),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                const Icon(Icons.play_arrow_rounded, color: AppTheme.accentMagenta, size: 14),
-                                const SizedBox(width: 2),
+                                const Icon(Icons.business_rounded, color: AppTheme.accentViolet, size: 12),
+                                const SizedBox(width: 4),
                                 Text(
-                                  _formatDuration(note.durationMs),
+                                  note.customer!,
                                   style: const TextStyle(
-                                    color: AppTheme.accentMagenta,
+                                    color: AppTheme.accentViolet,
+                                    fontSize: 10,
                                     fontWeight: FontWeight.bold,
-                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        else
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: AppTheme.bgObsidian.withOpacity(0.5),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: AppTheme.borderLight),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: const [
+                                Icon(Icons.business_outlined, color: AppTheme.textMuted, size: 12),
+                                SizedBox(width: 4),
+                                Text(
+                                  'Unassigned',
+                                  style: TextStyle(
+                                    color: AppTheme.textMuted,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w500,
                                   ),
                                 ),
                               ],
                             ),
                           ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      // Date and metadata
-                      Text(
-                        dateFormatted,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: AppTheme.textMuted,
-                          fontSize: 12,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      // Transcript preview
-                      Text(
-                        note.transcript,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: AppTheme.textSecondary,
-                        ),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 12),
-                      // Customer Badge and Action Menu
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          if (note.customer != null && note.customer!.isNotEmpty)
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: AppTheme.accentViolet.withOpacity(0.15),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: AppTheme.accentViolet.withOpacity(0.3)),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.business_rounded, color: AppTheme.accentViolet, size: 12),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    note.customer!,
-                                    style: const TextStyle(
-                                      color: AppTheme.accentViolet,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            )
-                          else
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: AppTheme.bgObsidian.withOpacity(0.5),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: AppTheme.borderLight),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: const [
-                                  Icon(Icons.business_outlined, color: AppTheme.textMuted, size: 12),
-                                  SizedBox(width: 4),
-                                  Text(
-                                    'Unassigned',
-                                    style: TextStyle(
-                                      color: AppTheme.textMuted,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          // Delete / Menu trigger
-                          GestureDetector(
-                            onTap: () => _deleteNote(note.id),
-                            child: const Padding(
-                              padding: EdgeInsets.symmetric(horizontal: 4.0),
-                              child: Icon(
-                                Icons.delete_outline_rounded,
-                                color: Colors.redAccent,
-                                size: 18,
-                              ),
+                        GestureDetector(
+                          onTap: () => _deleteNote(note.id),
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 4.0),
+                            child: Icon(
+                              Icons.delete_outline_rounded,
+                              color: Colors.redAccent,
+                              size: 18,
                             ),
                           ),
-                        ],
-                      ),
-                    ],
-                  ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -486,6 +442,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       ),
     );
   }
+
 
   // Empty State Widget
   Widget _buildEmptyState() {
@@ -591,6 +548,94 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           ),
         );
       },
+    );
+  }
+
+  Widget _buildProcessingIndicator() {
+    final processingNotes = _allNotes.where((n) => n.isProcessing).toList();
+    final visibleNotes = processingNotes.where((n) => !_dismissedTaskIds.contains(n.id)).toList();
+
+    if (visibleNotes.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 4.0),
+      child: Column(
+        children: visibleNotes.map((note) {
+          return Container(
+            margin: const EdgeInsets.only(bottom: 8.0),
+            padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  AppTheme.accentViolet.withOpacity(0.12),
+                  AppTheme.accentCyan.withOpacity(0.08),
+                ],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: AppTheme.accentViolet.withOpacity(0.25),
+                width: 1,
+              ),
+            ),
+            child: Row(
+              children: [
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.5,
+                    valueColor: AlwaysStoppedAnimation<Color>(AppTheme.accentCyan),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        "Transcribing voice note...",
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: AppTheme.textPrimary,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        "Duration: ${_formatDuration(note.durationMs)}",
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: AppTheme.textSecondary.withOpacity(0.7),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _dismissedTaskIds.add(note.id);
+                    });
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    child: const Icon(
+                      Icons.close_rounded,
+                      size: 14,
+                      color: AppTheme.textSecondary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }).toList(),
+      ),
     );
   }
 }

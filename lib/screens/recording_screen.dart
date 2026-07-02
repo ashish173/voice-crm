@@ -1,13 +1,14 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter_spinkit/flutter_spinkit.dart';
 import 'package:record/record.dart';
-import '../main.dart' as app_globals;
+import 'package:whisperflow_replica/main.dart' as app_globals;
 import '../models/voice_note.dart';
-import '../services/ai_service.dart';
+import '../services/ai_service.dart' show NotEnoughAudioException;
 import '../services/recording_service.dart';
 import '../services/storage_service.dart';
+import '../services/background_processor.dart';
 import '../theme/app_theme.dart';
+import 'package:uuid/uuid.dart';
 
 class RecordingScreen extends StatefulWidget {
   final bool autoStart;
@@ -54,7 +55,6 @@ class _RecordingScreenState extends State<RecordingScreen> with TickerProviderSt
     _timer?.cancel();
     _ampSubscription?.cancel();
     _orbController.dispose();
-    _recordingService.dispose();
     super.dispose();
   }
 
@@ -155,47 +155,91 @@ class _RecordingScreenState extends State<RecordingScreen> with TickerProviderSt
 
   // Save
   void _stopAndSaveNote() async {
+    // Guard against a second side-button press re-triggering this while we're
+    // already stopping/processing (e.g. a long-press firing the deep link twice).
+    if (_isProcessing) return;
+    _isProcessing = true;
+
     _timer?.cancel();
     _ampSubscription?.cancel();
     _orbController.stop();
 
-    setState(() {
-      _isProcessing = true;
-    });
+    // Clear the stop callback immediately so duplicate presses are ignored
+    app_globals.onStopRecordingRequested = null;
+
+    // Pop the screen immediately back to the home screen
+    if (mounted) {
+      Navigator.pop(context, true);
+    }
 
     try {
-      final recordResult = await _recordingService.stopRecording();
+      final recordResult = await _recordingService.stopRecording().timeout(
+        const Duration(seconds: 10),
+        onTimeout: () => throw Exception("Timed out while stopping the recording"),
+      );
       if (recordResult != null) {
         final String path = recordResult['filePath'];
         final int durationMs = recordResult['durationMs'];
 
-        // Process audio with AI
-        final VoiceNote note = await AIService.processAudioNote(path, durationMs);
-        
-        // Save note metadata locally
-        await StorageService.saveVoiceNote(note);
+        // Create and save placeholder voice note locally
+        final String noteId = const Uuid().v4();
+        final VoiceNote placeholderNote = VoiceNote(
+          id: noteId,
+          title: "Transcribing...",
+          createdAt: DateTime.now(),
+          filePath: path,
+          durationMs: durationMs,
+          transcript: "",
+          isProcessing: true,
+        );
 
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text("Flow processed: ${note.title}"),
+        await StorageService.saveVoiceNote(placeholderNote);
+
+        // Start background processing
+        BackgroundProcessor.startProcessing(placeholderNote);
+
+        // Notify home screen to reload
+        if (app_globals.onVoiceNotesChanged != null) {
+          app_globals.onVoiceNotesChanged!();
+        }
+
+        final globalContext = app_globals.navigatorKey.currentContext;
+        if (globalContext != null) {
+          ScaffoldMessenger.of(globalContext).showSnackBar(
+            const SnackBar(
+              content: Text("Transcribing voice note in background..."),
               backgroundColor: AppTheme.accentViolet,
+              duration: Duration(seconds: 3),
             ),
           );
-          Navigator.pop(context, true); // Return success
         }
-      } else {
-        if (mounted) Navigator.pop(context);
+      }
+    } on NotEnoughAudioException catch (e) {
+      debugPrint("Not enough audio: ${e.message}");
+      final globalContext = app_globals.navigatorKey.currentContext;
+      if (globalContext != null) {
+        ScaffoldMessenger.of(globalContext).showSnackBar(
+          SnackBar(
+            content: Text("Recording too short: ${e.message}"),
+            backgroundColor: Colors.orangeAccent,
+          ),
+        );
       }
     } catch (e) {
-      if (mounted) {
-        setState(() => _isProcessing = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Error processing note: $e")),
+      debugPrint("Error stopping recording: $e");
+      final globalContext = app_globals.navigatorKey.currentContext;
+      if (globalContext != null) {
+        ScaffoldMessenger.of(globalContext).showSnackBar(
+          SnackBar(
+            content: Text("We couldn't stop the recording: $e"),
+            backgroundColor: Colors.redAccent,
+          ),
         );
       }
     }
   }
+
+
 
   // Format MM:SS
   String _formatTime(int totalSecs) {
@@ -218,62 +262,8 @@ class _RecordingScreenState extends State<RecordingScreen> with TickerProviderSt
             gradient: AppTheme.backgroundGradient,
           ),
           child: SafeArea(
-            child: _isProcessing 
-                ? _buildProcessingState() 
-                : _buildRecordingState(),
+            child: _buildRecordingState(),
           ),
-        ),
-      ),
-    );
-  }
-
-  // 1. AI Processing Loading Overlay
-  Widget _buildProcessingState() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 40.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const SpinKitDoubleBounce(
-              color: AppTheme.accentMagenta,
-              size: 80.0,
-            ),
-            const SizedBox(height: 40),
-            Text(
-              "Flow AI Processing...",
-              style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              "Polishing your transcription, generating action items, and extracting key insights...",
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: AppTheme.textSecondary,
-              ),
-            ),
-            const SizedBox(height: 20),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: AppTheme.glassDecoration(borderRadius: 20),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.bolt, color: AppTheme.accentCyan, size: 16),
-                  const SizedBox(width: 6),
-                  Text(
-                    "Powered by Gemini 1.5 Flash",
-                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      color: AppTheme.accentCyan,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
         ),
       ),
     );
